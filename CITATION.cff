@@ -1,0 +1,11 @@
+cff-version: 1.2.0
+title: shiftglass
+message: "If you use this software in research, cite the repository release."
+type: software
+authors:
+  - family-names: Dasari
+    given-names: Sushanth
+repository-code: https://github.com/sushxnthd/shiftglass
+license: MIT
+version: 0.1.0
+date-released: 2026-08-12
