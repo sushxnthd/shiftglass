@@ -1,0 +1,16 @@
+{
+  "n": 1800,
+  "top_two": [
+    "mean_shift",
+    "variance_shift"
+  ],
+  "mmd2": 0.08665,
+  "covariance_shift": 1.440286,
+  "feature_scores": {
+    "mean_shift": 0.5469,
+    "variance_shift": 0.253782,
+    "stable_a": 0.021549,
+    "stable_c": 0.013514,
+    "stable_b": 0.01308
+  }
+}
