@@ -1,0 +1,29 @@
+[build-system]
+requires = ["setuptools>=69"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "shiftglass"
+version = "0.1.0"
+description = "Compact distribution-shift diagnostics with per-feature drift and global MMD."
+readme = "README.md"
+requires-python = ">=3.10"
+license = "MIT"
+authors = [{name = "Sushanth Dasari"}]
+dependencies = ["numpy>=1.24"]
+
+[project.urls]
+Repository = "https://github.com/sushxnthd/shiftglass"
+Demo = "https://sushxnthd.github.io/shiftglass/"
+
+[project.optional-dependencies]
+dev = ["pytest>=8"]
+
+[project.scripts]
+shiftglass = "shiftglass.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

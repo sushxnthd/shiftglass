@@ -1,0 +1,12 @@
+{
+  "description": "Compact distribution-shift diagnostics with per-feature drift and global MMD.",
+  "topics": [
+    "machine-learning",
+    "distribution-shift",
+    "data-drift",
+    "mmd",
+    "monitoring",
+    "robustness"
+  ],
+  "homepage": "https://sushxnthd.github.io/shiftglass/"
+}
