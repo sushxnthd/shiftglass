@@ -240,10 +240,12 @@ def main():
     train_files = train_files[:52]
     test_files = test_files[:12]
     fit_files = train_files[:40]
-    cal_files = train_files[40:52]
+    ref_files = train_files[40:46]
+    radius_files = train_files[46:52]
 
     X_fit, y_fit = load_vectors(fit_files, extractor)
-    X_cal, y_cal = load_vectors(cal_files, extractor)
+    X_ref, y_ref = load_vectors(ref_files, extractor)
+    X_radius, y_radius = load_vectors(radius_files, extractor)
 
     kfeat = min(args.features, X_fit.shape[1])
     selector = SelectKBest(f_classif, k=kfeat)
@@ -256,14 +258,20 @@ def main():
     clf.fit(Xz, y_fit)
 
     fit_scores = predict_scores(X_fit, selector, scaler, clf)
-    cal_scores = predict_scores(X_cal, selector, scaler, clf)
+    ref_scores = predict_scores(X_ref, selector, scaler, clf)
+    radius_scores = predict_scores(X_radius, selector, scaler, clf)
     fit_auc = roc_auc_score(y_fit, fit_scores)
-    cal_auc = roc_auc_score(y_cal, cal_scores)
+    ref_auc = roc_auc_score(y_ref, ref_scores)
+    radius_auc = roc_auc_score(y_radius, radius_scores)
 
     key_scores = np.concatenate(
-        [fit_scores[y_fit == 1], cal_scores[y_cal == 1]]
+        [
+            fit_scores[y_fit == 1],
+            ref_scores[y_ref == 1],
+            radius_scores[y_radius == 1],
+        ]
     )
-    cal_neg = cal_scores[y_cal == 0]
+    ref_neg = ref_scores[y_ref == 0]
     n_keys = int(key_scores.size)
     oracle_bytes = oracle_params_bytes(selector, scaler, clf, X_fit.shape[1])
     oracle_bits = oracle_bytes * 8
@@ -276,7 +284,19 @@ def main():
     edges[0], edges[-1] = -np.inf, np.inf
 
     g = hist_dist(key_scores, edges)
-    h = hist_dist(cal_neg, edges)
+    h = hist_dist(ref_neg, edges)
+
+    # Select the deployed robustness radius using only pre-test history:
+    # weeks 40-45 define the reference workload; weeks 46-51 measure
+    # recent temporal movement. The future 12 test weeks never tune rho.
+    radius_week_tvs = []
+    for fp in radius_files:
+        Xr, yr = load_vectors([fp], extractor)
+        sr = predict_scores(Xr, selector, scaler, clf)
+        qr = hist_dist(sr[yr == 0], edges)
+        radius_week_tvs.append(tv(qr, h))
+    selected_rho = float(max(radius_week_tvs)) if radius_week_tvs else 0.0
+
     f_std = standard_allocation(g, h, args.target)
     std_filter_bits = weighted_bf_bits(n_keys, g, f_std)
     classical_bits = bf_bits(n_keys, args.target)
@@ -304,7 +324,10 @@ def main():
             }
         )
 
-    rho_grid = [0.0, 0.01, 0.02, 0.05, 0.075, 0.10, 0.15, 0.20, 0.30, 0.40]
+    rho_grid = sorted(set(
+        [0.0, 0.01, 0.02, 0.05, 0.075, 0.10, 0.15, 0.20, 0.30, 0.40]
+        + [selected_rho]
+    ))
     rows = []
     cert_rows = []
     rng = np.random.default_rng(7)
@@ -371,33 +394,22 @@ def main():
                 }
             )
 
-    candidates = [
-        r
-        for r in rows
-        if r["coverage_pct"] >= 80.0
-        and r["end_to_end_saving_pct"] >= 15.0
-        and r["designed_worstcase_fpr"] <= args.target * 1.0001
-    ]
-    promoted = []
-    for r in candidates:
-        cs = [
-            c
-            for c in cert_rows
-            if c["rho"] == r["rho"] and c["audit_m"] == 1000
-        ]
-        if (
-            cs
-            and cs[0]["accept_rate"] >= 0.50
-            and cs[0]["false_accept_rate"] <= 0.05
-        ):
-            promoted.append((r, cs[0]))
-
-    decision = "PROMOTE" if promoted else "KILL_OR_REDESIGN"
-    best = (
-        max(promoted, key=lambda rc: rc[0]["end_to_end_saving_pct"])[0]
-        if promoted
-        else None
+    # The decisive verdict is based on exactly one radius chosen from
+    # pre-test history, never on whichever rho looks best on future data.
+    selected_row = min(rows, key=lambda r: abs(r["rho"] - selected_rho))
+    selected_cert = next(
+        c for c in cert_rows
+        if abs(c["rho"] - selected_row["rho"]) < 1e-12
+        and c["audit_m"] == 1000
     )
+    passes = (
+        selected_row["coverage_pct"] >= 80.0
+        and selected_row["end_to_end_saving_pct"] >= 15.0
+        and selected_row["designed_worstcase_fpr"] <= args.target * 1.0001
+        and selected_cert["accept_rate"] >= 0.50
+        and selected_cert["false_accept_rate"] <= 0.05
+    )
+    decision = "PROMOTE" if passes else "KILL_OR_REDESIGN"
 
     with (outdir / "rho_sweep.csv").open("w", newline="") as fcsv:
         cols = [k for k in rows[0].keys() if k != "allocation"]
@@ -428,18 +440,23 @@ def main():
     summary = {
         "dataset": "EMBER2024 PDF official temporal subset",
         "split": (
-            "weeks 0-39 tiny-oracle fit; weeks 40-51 PLBF calibration; "
-            "official 12 future test weeks"
+            "weeks 0-39 tiny-oracle fit; weeks 40-45 reference workload; "
+            "weeks 46-51 choose robustness radius; official 12 future test "
+            "weeks untouched until evaluation"
         ),
         "target_fpr": args.target,
         "regions": args.regions,
         "selected_features": kfeat,
         "fit_rows": int(len(y_fit)),
-        "cal_rows": int(len(y_cal)),
+        "reference_rows": int(len(y_ref)),
+        "radius_selection_rows": int(len(y_radius)),
         "n_keys": n_keys,
-        "cal_nonkeys": int(len(cal_neg)),
+        "reference_nonkeys": int(len(ref_neg)),
         "fit_auc": float(fit_auc),
-        "cal_auc": float(cal_auc),
+        "reference_auc": float(ref_auc),
+        "radius_selection_auc": float(radius_auc),
+        "historical_radius_week_tvs": radius_week_tvs,
+        "selected_rho_from_history": selected_rho,
         "oracle_bytes": oracle_bytes,
         "classical_bits": classical_bits,
         "standard_filter_bits": std_filter_bits,
@@ -462,10 +479,8 @@ def main():
             "confidence": 1 - args.delta,
         },
         "decision": decision,
-        "best_promoted_rho": None if best is None else best["rho"],
-        "best_promoted_end_to_end_saving_pct": None
-        if best is None
-        else best["end_to_end_saving_pct"],
+        "selected_operating_point": selected_row,
+        "selected_audit_1000": selected_cert,
         "rho_sweep": rows,
     }
     (outdir / "summary.json").write_text(json.dumps(summary, indent=2))
