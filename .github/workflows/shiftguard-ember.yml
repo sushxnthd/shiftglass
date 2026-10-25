@@ -29,6 +29,11 @@ jobs:
           python -m pip install numpy scipy scikit-learn huggingface_hub
           git clone --depth 1 https://github.com/FutureComputing4AI/EMBER2024.git /tmp/EMBER2024
           python -m pip install -e /tmp/EMBER2024
+          # thrember currently pulls oscrypto 1.3.0 from PyPI; its OpenSSL
+          # version parser breaks on current hosted runners. Upstream fixed
+          # this in d5f3437, so pin that exact fix for reproducibility.
+          python -m pip install --force-reinstall \
+            git+https://github.com/wbond/oscrypto.git@d5f3437ed24257895ae1edd9e503cfb352e635a8
 
       - name: Run chronological EMBER2024 PDF experiment
         run: |
