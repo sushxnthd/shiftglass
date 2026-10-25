@@ -3,7 +3,7 @@ import argparse, csv, json, math, zipfile
 from pathlib import Path
 
 import numpy as np
-from scipy.optimize import minimize
+import cvxpy as cp
 from scipy.stats import beta
 from sklearn.feature_selection import SelectKBest, f_classif
 from sklearn.linear_model import LogisticRegression
@@ -89,39 +89,57 @@ def standard_allocation(g, h, target):
 
 
 def robust_allocation(g, h, target, rho):
+    """Globally solve the TV-robust allocation using the LP dual.
+
+    Inner problem:
+        max_q q^T f
+        s.t. TV(q,h) <= rho, q in simplex.
+
+    Its LP dual introduces a,b >= 0, c >= 0, lambda free:
+        a - b + lambda >= f
+        c >= a + b
+        h^T(a-b) + 2*rho*c + lambda <= target.
+
+    The outer objective -sum_i g_i log(f_i) is convex, so this is a
+    finite-dimensional convex program rather than a local nonlinear search.
+    """
     g, h = normalize(g), normalize(h)
     if rho <= 1e-12:
         return standard_allocation(g, h, target), True, "standard"
+
     k = len(g)
-    flat = np.full(k, min(target * 0.999, 0.999), dtype=float)
-    std = standard_allocation(g, h, target)
-    starts = [flat, 0.75 * flat + 0.25 * std, 0.5 * flat + 0.5 * std]
+    f = cp.Variable(k)
+    a = cp.Variable(k, nonneg=True)
+    b = cp.Variable(k, nonneg=True)
+    c = cp.Variable(nonneg=True)
+    lam = cp.Variable()
 
-    def obj(f):
-        return np.sum(g * (-np.log(np.clip(f, 1e-12, 1.0))))
+    constraints = [
+        f >= 1e-9,
+        f <= 1.0,
+        a - b + lam >= f,
+        c >= a + b,
+        h @ (a - b) + 2.0 * rho * c + lam <= target,
+    ]
+    objective = cp.Minimize(cp.sum(cp.multiply(g, -cp.log(f))))
+    problem = cp.Problem(objective, constraints)
 
-    def con(f):
-        return target - worstcase_tv(h, f, rho)
+    last_error = None
+    for solver in (cp.CLARABEL, cp.SCS):
+        try:
+            problem.solve(solver=solver, verbose=False)
+            if f.value is None:
+                continue
+            out = np.clip(np.asarray(f.value, dtype=float), 1e-9, 1.0)
+            wc = worstcase_tv(h, out, rho)
+            if wc <= target * (1 + 2e-6):
+                return out, problem.status in ("optimal", "optimal_inaccurate"), str(problem.status)
+        except Exception as exc:
+            last_error = repr(exc)
 
-    best = None
-    for x0 in starts:
-        res = minimize(
-            obj,
-            x0,
-            method="SLSQP",
-            bounds=[(1e-8, 1.0)] * k,
-            constraints=[{"type": "ineq", "fun": con}],
-            options={"maxiter": 3000, "ftol": 1e-11, "disp": False},
-        )
-        if res.x is None:
-            continue
-        feasible = worstcase_tv(h, res.x, rho) <= target * (1 + 1e-7)
-        if feasible and (best is None or obj(res.x) < obj(best.x)):
-            best = res
-    if best is None:
-        return np.full(k, target), False, "fallback_flat"
-    return np.clip(best.x, 1e-8, 1.0), bool(best.success), best.message
-
+    # Safe failure mode: classical allocation. This can only sacrifice
+    # memory savings; it cannot manufacture a robustness success.
+    return np.full(k, target), False, "safe_flat_fallback:" + str(last_error)
 
 def cp_upper(x, n, delta=0.05):
     if n <= 0 or x >= n:
