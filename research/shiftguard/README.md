@@ -7,8 +7,11 @@ This branch contains a kill-or-promote experiment for a distributionally robust 
 The script downloads the official **EMBER2024 PDF** train/test archives. It uses:
 
 - weeks 0–39: fit a compact 256-feature linear maliciousness oracle;
-- weeks 40–51: estimate the non-key score distribution used to allocate the learned Bloom filter;
+- weeks 40–45: define the reference non-key score distribution;
+- weeks 46–51: select the robustness radius from recent historical drift;
 - official weeks 52–63: untouched future test weeks.
+
+The claimed operating radius is therefore fixed before any future test result is observed. A full rho sweep is reported only as a descriptive robustness-memory phase diagram.
 
 Malicious files from weeks 0–51 are treated as the membership keys. Benign files are non-key queries.
 
@@ -26,7 +29,7 @@ The experiment counts the deployed linear oracle parameters in end-to-end memory
 
 ## Precommitted kill criteria
 
-Promote the idea only if one robust operating point simultaneously achieves:
+Promote the idea only if the **single operating point whose radius was selected from weeks 46–51, before future evaluation**, simultaneously achieves:
 
 - >= 80% coverage of the 12 future EMBER weeks by its declared TV robustness radius;
 - >= 15% **end-to-end** memory saving versus a classical Bloom filter, including oracle parameters;
