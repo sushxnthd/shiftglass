@@ -1,0 +1,56 @@
+name: ShiftGuard temporal EMBER
+
+on:
+  push:
+    branches:
+      - research/shiftguard-ember
+    paths:
+      - "research/shiftguard/**"
+      - ".github/workflows/shiftguard-ember.yml"
+  workflow_dispatch:
+
+jobs:
+  ember-pdf:
+    runs-on: ubuntu-latest
+    timeout-minutes: 55
+    env:
+      HF_HUB_DISABLE_XET: "1"
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+
+      - name: Install experiment dependencies
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install numpy scipy scikit-learn huggingface_hub
+          git clone --depth 1 https://github.com/FutureComputing4AI/EMBER2024.git /tmp/EMBER2024
+          python -m pip install -e /tmp/EMBER2024
+
+      - name: Run chronological EMBER2024 PDF experiment
+        run: |
+          python research/shiftguard/ember_temporal.py \
+            --workdir "$RUNNER_TEMP/shiftguard" \
+            --outdir research/shiftguard/results \
+            --target 0.01 \
+            --regions 8 \
+            --features 256
+
+      - name: Show decision
+        if: always()
+        run: |
+          if [ -f research/shiftguard/results/summary.json ]; then
+            cat research/shiftguard/results/summary.json
+          fi
+
+      - name: Upload experiment outputs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: shiftguard-ember-pdf-results
+          path: research/shiftguard/results/
+          if-no-files-found: warn
+          retention-days: 30
