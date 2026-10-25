@@ -1,5 +1,9 @@
 name: ShiftGuard temporal EMBER
 
+concurrency:
+  group: shiftguard-ember-${{ github.ref }}
+  cancel-in-progress: true
+
 on:
   push:
     branches:
