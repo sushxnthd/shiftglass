@@ -4,7 +4,7 @@ from pathlib import Path
 
 import numpy as np
 import cvxpy as cp
-from scipy.stats import beta
+from scipy.stats import beta, binom
 from sklearn.feature_selection import SelectKBest, f_classif
 from sklearn.linear_model import LogisticRegression
 from sklearn.metrics import roc_auc_score
@@ -231,7 +231,10 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--workdir", default=".shiftguard-work")
     ap.add_argument("--outdir", default="research/shiftguard/results")
-    ap.add_argument("--target", type=float, default=0.01)
+    ap.add_argument("--target", type=float, default=0.01,
+                    help="operational FPR limit used for the classical baseline and deployment certificate")
+    ap.add_argument("--design-fraction", type=float, default=0.60,
+                    help="ShiftGuard designs to this fraction of the operational FPR to reserve audit headroom")
     ap.add_argument("--regions", type=int, default=8)
     ap.add_argument("--features", type=int, default=256)
     ap.add_argument("--delta", type=float, default=0.05)
@@ -315,9 +318,14 @@ def main():
         radius_week_tvs.append(tv(qr, h))
     selected_rho = float(max(radius_week_tvs)) if radius_week_tvs else 0.0
 
-    f_std = standard_allocation(g, h, args.target)
+    operational_target = args.target
+    design_target = operational_target * args.design_fraction
+
+    # Fair baseline: ordinary PLBF and classical BF are both allowed the full
+    # operational target. ShiftGuard deliberately reserves statistical headroom.
+    f_std = standard_allocation(g, h, operational_target)
     std_filter_bits = weighted_bf_bits(n_keys, g, f_std)
-    classical_bits = bf_bits(n_keys, args.target)
+    classical_bits = bf_bits(n_keys, operational_target)
 
     weekly = []
     for wi, fp in enumerate(test_files):
@@ -351,7 +359,7 @@ def main():
     rng = np.random.default_rng(7)
 
     for rho in rho_grid:
-        f, ok, msg = robust_allocation(g, h, args.target, rho)
+        f, ok, msg = robust_allocation(g, h, design_target, rho)
         filt_bits = weighted_bf_bits(n_keys, g, f)
         total_bits = filt_bits + oracle_bits
         future_fprs = [float(np.dot(w["q"], f)) for w in weekly]
@@ -369,13 +377,15 @@ def main():
                 "filter_saving_pct": 100 * (1 - filt_bits / classical_bits),
                 "end_to_end_saving_pct": 100
                 * (1 - total_bits / classical_bits),
+                "design_target_fpr": design_target,
+                "operational_target_fpr": operational_target,
                 "designed_worstcase_fpr": worstcase_tv(h, f, rho),
                 "covered_weeks": len(covered),
                 "coverage_pct": 100 * len(covered) / len(weekly),
                 "max_future_expected_fpr": max(future_fprs),
                 "mean_future_expected_fpr": float(np.mean(future_fprs)),
-                "future_weeks_over_target": int(
-                    sum(x > args.target * (1 + 1e-9) for x in future_fprs)
+                "future_weeks_over_operational_target": int(
+                    sum(x > operational_target * (1 + 1e-9) for x in future_fprs)
                 ),
                 "max_future_tv": max(future_tvs),
                 "allocation": f.tolist(),
@@ -396,9 +406,9 @@ def main():
                     probs = f[samp]
                     x = int((rng.random(m) < probs).sum())
                     upper = cp_upper(x, m, args.delta)
-                    passed = upper <= args.target
+                    passed = upper <= operational_target
                     accepts += int(passed)
-                    false_accepts += int(passed and true_fpr > args.target)
+                    false_accepts += int(passed and true_fpr > operational_target)
                     trials += 1
             cert_rows.append(
                 {
@@ -418,16 +428,25 @@ def main():
     selected_cert = next(
         c for c in cert_rows
         if abs(c["rho"] - selected_row["rho"]) < 1e-12
-        and c["audit_m"] == 1000
+        and c["audit_m"] == 2000
     )
-    passes = (
+    standard_future_breaches = int(
+        sum(w["std_expected_fpr"] > operational_target * (1 + 1e-9) for w in weekly)
+    )
+    core_passes = (
         selected_row["coverage_pct"] >= 80.0
         and selected_row["end_to_end_saving_pct"] >= 15.0
-        and selected_row["designed_worstcase_fpr"] <= args.target * 1.0001
+        and selected_row["designed_worstcase_fpr"] <= design_target * 1.0001
+        and selected_row["future_weeks_over_operational_target"] == 0
         and selected_cert["accept_rate"] >= 0.50
         and selected_cert["false_accept_rate"] <= 0.05
     )
-    decision = "PROMOTE" if passes else "KILL_OR_REDESIGN"
+    if core_passes and standard_future_breaches >= 1:
+        decision = "PROMOTE"
+    elif core_passes:
+        decision = "REPLICATE_STRONGER_SHIFT"
+    else:
+        decision = "KILL_OR_REDESIGN"
 
     with (outdir / "rho_sweep.csv").open("w", newline="") as fcsv:
         cols = [k for k in rows[0].keys() if k != "allocation"]
@@ -462,7 +481,9 @@ def main():
             "weeks 46-51 choose robustness radius; official 12 future test "
             "weeks untouched until evaluation"
         ),
-        "target_fpr": args.target,
+        "operational_target_fpr": operational_target,
+        "design_target_fpr": design_target,
+        "design_fraction": args.design_fraction,
         "regions": args.regions,
         "selected_features": kfeat,
         "fit_rows": int(len(y_fit)),
@@ -484,6 +505,7 @@ def main():
         "standard_max_future_expected_fpr": max(
             w["std_expected_fpr"] for w in weekly
         ),
+        "standard_future_weeks_over_operational_target": standard_future_breaches,
         "future_max_tv": max(w["tv_from_cal"] for w in weekly),
         "future_median_tv": float(
             np.median([w["tv_from_cal"] for w in weekly])
@@ -491,14 +513,16 @@ def main():
         "kill_criteria": {
             "future_week_coverage_min_pct": 80,
             "end_to_end_memory_saving_min_pct": 15,
-            "audit_queries": 1000,
+            "future_robust_target_breaches_max": 0,
+            "audit_queries": 2000,
             "audit_accept_rate_min": 0.50,
             "empirical_false_certification_max": 0.05,
             "confidence": 1 - args.delta,
+            "ordinary_plbf_future_breaches_min_for_full_promotion": 1,
         },
         "decision": decision,
         "selected_operating_point": selected_row,
-        "selected_audit_1000": selected_cert,
+        "selected_audit_2000": selected_cert,
         "rho_sweep": rows,
     }
     (outdir / "summary.json").write_text(json.dumps(summary, indent=2))
