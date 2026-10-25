@@ -11,7 +11,7 @@ on:
 
 jobs:
   ember-pdf:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-22.04
     timeout-minutes: 55
     env:
       HF_HUB_DISABLE_XET: "1"
